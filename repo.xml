@@ -1,0 +1,15 @@
+<?xml version='1.0' encoding='utf-8'?>
+<extensions>
+  <details>
+    <title lang="EN">Multichannel &amp; Bitstream Audio Repository</title>
+  </details>
+  <plugins>
+    <plugin name="MultichannelAudio" version="1.0.9" minTarget="9.0.0" maxTarget="9.*">
+      <title lang="EN">Multichannel &amp; Bitstream Audio</title>
+      <desc lang="EN">Enables discrete multichannel LPCM (up to 7.1) and raw IEC 61937 HDMI bitstream passthrough (Dolby Digital Plus Atmos, Dolby TrueHD Atmos, DTS-HD MA / Auro-3D) for capable Squeezelite players, with automatic stereo downmix fallback for stereo players and mixed sync groups.</desc>
+      <url>https://github.com/gorman42/lms-multichannel-audio/releases/download/v1.0.9/MultichannelAudio-1.0.9.zip</url>
+      <sha>135fc4fc0ed30443aafe316b01b300e418b57b95</sha>
+      <creator>gorman42</creator>
+    </plugin>
+  </plugins>
+</extensions>

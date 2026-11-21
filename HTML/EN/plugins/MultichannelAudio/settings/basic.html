@@ -1,0 +1,50 @@
+[% PROCESS settings/header.html %]
+
+	[% WRAPPER setting title="PLUGIN_MULTICHANNEL_AUDIO_FFPROBE_PATH" desc="PLUGIN_MULTICHANNEL_AUDIO_FFPROBE_PATH_DESC" %]
+		<input type="text" class="stdedit" name="pref_ffprobe_path" id="ffprobe_path" value="[% prefs.pref_ffprobe_path | html %]" size="40" />
+	[% END %]
+
+	[% WRAPPER setting title="PLUGIN_MULTICHANNEL_AUDIO_APPEND_TAGS" desc="PLUGIN_MULTICHANNEL_AUDIO_APPEND_TAGS_DESC" %]
+		<input type="checkbox" name="pref_append_title_tags" id="append_title_tags" value="1" [% IF prefs.pref_append_title_tags %]checked="checked"[% END %] />
+	[% END %]
+
+	<hr />
+	<h3>[% "PLUGIN_MULTICHANNEL_AUDIO_PLAYER_SECTION" | string %]</h3>
+
+	[% IF player_rows.size %]
+		[% FOREACH p = player_rows %]
+			[% WRAPPER setting title=p.name desc="PLUGIN_MULTICHANNEL_AUDIO_PLAYER_CAPS" %]
+				<div><strong>[% "PLUGIN_MULTICHANNEL_AUDIO_PLAYER_CAPS" | string %]:</strong> [% p.caps_summary | html %]</div>
+				<div style="margin-top: 6px;">
+					<label>
+						<input type="checkbox" name="player_enabled_[% p.id | html %]" value="1" [% IF p.player_enabled %]checked="checked"[% END %] />
+						[% "PLUGIN_MULTICHANNEL_AUDIO_PLAYER_ENABLED" | string %]
+					</label>
+				</div>
+				[% IF p.has_bitstream %]
+				<div style="margin-top: 4px;">
+					<label>
+						<input type="checkbox" name="allow_bitstream_[% p.id | html %]" value="1" [% IF p.allow_bitstream %]checked="checked"[% END %] />
+						[% "PLUGIN_MULTICHANNEL_AUDIO_PLAYER_BITSTREAM" | string %]
+					</label>
+				</div>
+				[% END %]
+				[% IF p.has_mch %]
+				<div style="margin-top: 4px;">
+					<label>[% "PLUGIN_MULTICHANNEL_AUDIO_PLAYER_MAX_CH" | string %]:
+						<select class="stdedit" name="max_channels_[% p.id | html %]">
+							<option value="0" [% IF p.max_channels == 0 %]selected="selected"[% END %]>[% "PLUGIN_MULTICHANNEL_AUDIO_PLAYER_AUTO" | string %]</option>
+							<option value="2" [% IF p.max_channels == 2 %]selected="selected"[% END %]>[% "PLUGIN_MULTICHANNEL_AUDIO_PLAYER_2CH" | string %]</option>
+							<option value="6" [% IF p.max_channels == 6 %]selected="selected"[% END %]>[% "PLUGIN_MULTICHANNEL_AUDIO_PLAYER_6CH" | string %]</option>
+							<option value="8" [% IF p.max_channels == 8 %]selected="selected"[% END %]>[% "PLUGIN_MULTICHANNEL_AUDIO_PLAYER_8CH" | string %]</option>
+						</select>
+					</label>
+				</div>
+				[% END %]
+			[% END %]
+		[% END %]
+	[% ELSE %]
+		<p>[% "PLUGIN_MULTICHANNEL_AUDIO_NO_MCH_PLAYERS" | string %]</p>
+	[% END %]
+
+[% PROCESS settings/footer.html %]

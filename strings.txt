@@ -1,0 +1,59 @@
+PLUGIN_MULTICHANNEL_AUDIO
+	EN	Multichannel & Bitstream Audio
+
+PLUGIN_MULTICHANNEL_AUDIO_DESC
+	EN	Enables discrete multichannel LPCM (up to 7.1) and raw IEC 61937 HDMI bitstream passthrough (Dolby Digital Plus Atmos, Dolby TrueHD Atmos, DTS-HD MA / Auro-3D) for capable Squeezelite players, with automatic stereo downmix fallback for stereo players and mixed sync groups.
+
+PLUGIN_MULTICHANNEL_AUDIO_SETTINGS
+	EN	Multichannel & Bitstream Audio
+
+PLUGIN_MULTICHANNEL_AUDIO_FFPROBE_PATH
+	EN	ffprobe Binary Path
+
+PLUGIN_MULTICHANNEL_AUDIO_FFPROBE_PATH_DESC
+	EN	Path or executable name for ffprobe used during library scans to inspect channel counts and Atmos/DTS-HD profiles (default: ffprobe).
+
+PLUGIN_MULTICHANNEL_AUDIO_APPEND_TAGS
+	EN	Append Format Tags to Track Titles
+
+PLUGIN_MULTICHANNEL_AUDIO_APPEND_TAGS_DESC
+	EN	When enabled, appends [Atmos], [Auro-3D], [5.1], or [7.1] to multichannel track titles in the LMS database during library scans. Disabled by default so LMS displays clean titles alongside native format/channel info. Requires a full library rescan to take effect.
+
+PLUGIN_MULTICHANNEL_AUDIO_PLAYER_SECTION
+	EN	Multichannel-Capable Players
+
+PLUGIN_MULTICHANNEL_AUDIO_NO_MCH_PLAYERS
+	EN	No multichannel-capable players are currently connected. Legacy stereo-only players are hidden and automatically receive 2-channel FLAC downmixes for multichannel tracks.
+
+PLUGIN_MULTICHANNEL_AUDIO_PLAYER_ENABLED
+	EN	Enable Multichannel & Bitstream Routing
+
+PLUGIN_MULTICHANNEL_AUDIO_PLAYER_ENABLED_DESC
+	EN	Allow multichannel LPCM and immersive bitstream delivery to this player when supported by its hardware capabilities.
+
+PLUGIN_MULTICHANNEL_AUDIO_PLAYER_MAX_CH
+	EN	Maximum LPCM Output Channels
+
+PLUGIN_MULTICHANNEL_AUDIO_PLAYER_MAX_CH_DESC
+	EN	Cap discrete LPCM channels sent to this player (Auto uses the player's advertised mch capability token).
+
+PLUGIN_MULTICHANNEL_AUDIO_PLAYER_AUTO
+	EN	Auto (from player capability)
+
+PLUGIN_MULTICHANNEL_AUDIO_PLAYER_2CH
+	EN	2.0 Stereo Downmix Only
+
+PLUGIN_MULTICHANNEL_AUDIO_PLAYER_6CH
+	EN	5.1 (6 Channels)
+
+PLUGIN_MULTICHANNEL_AUDIO_PLAYER_8CH
+	EN	7.1 (8 Channels)
+
+PLUGIN_MULTICHANNEL_AUDIO_PLAYER_BITSTREAM
+	EN	Allow HDMI Bitstream Passthrough (Atmos / DTS-HD MA)
+
+PLUGIN_MULTICHANNEL_AUDIO_PLAYER_BITSTREAM_DESC
+	EN	Allow raw E-AC-3 Atmos, TrueHD Atmos, and DTS-HD MA / Auro-3D passthrough when advertised by the player. Disable to fall back to 2-channel FLAC.
+
+PLUGIN_MULTICHANNEL_AUDIO_PLAYER_CAPS
+	EN	Detected Player Capabilities
