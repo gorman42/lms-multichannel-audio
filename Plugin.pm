@@ -43,6 +43,7 @@ my $orig_classForFormat;
 my $orig_getConvertCommand2;
 my $orig_canDirectStream;
 my $orig_stream_s;
+my $orig_local_deleted;
 
 sub initPlugin {
 	my $class = shift;
@@ -164,6 +165,37 @@ sub _installHooks {
 					}
 				}
 				return $orig;
+			};
+		}
+	}
+
+	# Hook Slim::Utils::Scanner::Local::deleted so removing a multi-chapter .mka
+	# base track ('cur') also purges its #start-end virtual chapter tracks.
+	if (!$orig_local_deleted) {
+		require Slim::Utils::Scanner::Local;
+		my $coderef = Slim::Utils::Scanner::Local->can('deleted');
+		if ($coderef) {
+			$orig_local_deleted = $coderef;
+			*Slim::Utils::Scanner::Local::deleted = sub {
+				my ($url) = @_;
+				if (defined $url && !ref $url && $url =~ /\.mka$/i) {
+					my $dbh = eval { Slim::Schema->dbh };
+					if ($dbh) {
+						my $sth = $dbh->prepare_cached(
+							'SELECT url FROM tracks WHERE url LIKE ? AND `virtual` = 1'
+						);
+						$sth->execute("$url#%");
+						my @vurls;
+						while (my ($vurl) = $sth->fetchrow_array) {
+							push @vurls, $vurl;
+						}
+						$sth->finish;
+						for my $vurl (@vurls) {
+							$orig_local_deleted->($vurl);
+						}
+					}
+				}
+				return $orig_local_deleted->(@_);
 			};
 		}
 	}
@@ -323,6 +355,7 @@ sub _removeHooks {
 	*Slim::Player::TranscodingHelper::getConvertCommand2 = $orig_getConvertCommand2  if $orig_getConvertCommand2;
 	*Slim::Player::Squeezebox2::canDirectStream          = $orig_canDirectStream     if $orig_canDirectStream;
 	*Slim::Player::Squeezebox2::stream_s                 = $orig_stream_s            if $orig_stream_s;
+	*Slim::Utils::Scanner::Local::deleted                = $orig_local_deleted       if $orig_local_deleted;
 }
 
 sub playerCapabilities {

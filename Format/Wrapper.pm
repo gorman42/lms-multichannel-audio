@@ -95,9 +95,35 @@ sub canSeek {
 	return 0;
 }
 
+sub _extractMkaCoverArt {
+	my ($path) = @_;
+	return undef unless defined $path && -f $path;
+
+	my $ffprobe = $prefs->get('ffprobe_path') || 'ffprobe';
+	my $ffmpeg  = $ffprobe;
+	$ffmpeg =~ s/ffprobe(\.exe)?$/ffmpeg$1/i;
+	$ffmpeg = 'ffmpeg' if $ffmpeg eq $ffprobe;
+	my $bin = Slim::Utils::Misc::findbin($ffmpeg) || $ffmpeg;
+
+	open my $pipe, '-|', $bin, '-v', 'quiet', '-i', $path, '-map', '0:v:0', '-c:v', 'copy', '-f', 'image2pipe', '-'
+		or return undef;
+	binmode $pipe;
+	local $/;
+	my $data = <$pipe>;
+	close $pipe;
+
+	return (defined $data && length($data) > 0) ? $data : undef;
+}
+
 sub getCoverArt {
 	my ($class, $url) = @_;
 	my $path = _urlToPath($url);
+	if (defined $path) {
+		$path =~ s/#[^#]+$//;
+		if ($path =~ /\.mka$/i) {
+			return _extractMkaCoverArt($path);
+		}
+	}
 	my $native = _ensureNativeLoaded(_nativeClassForPath($path) || _fallbackNativeClass());
 	if ($native && $native->can('getCoverArt')) {
 		return $native->getCoverArt($url);
@@ -131,6 +157,122 @@ sub getTag {
 
 	my $channels = $probe->{channels} || 2;
 	my $vtype    = $probe->{virtual_type};
+	my $is_mka   = ($path =~ /\.mka$/i) ? 1 : 0;
+
+	# Matroska (.mka) container handling (single-track or multi-chapter album)
+	if ($is_mka) {
+		my $eff_type  = $vtype || 'mka';
+		my $chapters  = $probe->{chapters} || [];
+		my $cover_len = 0;
+		if ($probe->{has_cover}) {
+			my $art = _extractMkaCoverArt($path);
+			$cover_len = length($art) if defined $art;
+		}
+
+		# Multi-chapter .mka album container
+		if (scalar(@$chapters) > 1) {
+			# Direct anchor lookup if requested for a single chapter fragment
+			if (defined $anchor && $anchor =~ /^([\d.]+)-([\d.]+)$/) {
+				my ($a_start, $a_end) = ($1 + 0, $2 + 0);
+				for my $idx (0 .. $#$chapters) {
+					my $ch = $chapters->[$idx];
+					my $cs = ($ch->{start_time} // 0) + 0;
+					my $ce = ($ch->{end_time}   // 0) + 0;
+					if (abs($cs - $a_start) < 0.05 && $ce > $cs) {
+						my $ctags = _buildTagsFromProbe($path, $probe, undef, $ch->{tags}, $idx + 1);
+						$ctags->{CONTENT_TYPE} = $eff_type;
+						$ctags->{CHANNELS}     = $channels;
+						$ctags->{SECS}         = $ce - $cs;
+						$ctags->{COVER_LENGTH} = $cover_len if $cover_len;
+						if ($vtype && $prefs->get('append_title_tags') && $ctags->{TITLE}) {
+							my $badge = $probe->{badge};
+							$ctags->{TITLE} .= " $badge" if $badge && $ctags->{TITLE} !~ /\Q$badge\E/;
+						}
+						return wantarray ? ($ctags, $eff_type) : $ctags;
+					}
+				}
+			}
+
+			my $file_url = ($url =~ m{^file://}i) ? $url : Slim::Utils::Misc::fileURLFromPath($path);
+			$file_url =~ s/#[^#]+$//;
+
+			eval {
+				Slim::Schema->search('Track', { url => { like => "$file_url#%" } })->delete_all;
+			};
+
+			my $created = 0;
+			for my $idx (0 .. $#$chapters) {
+				my $ch    = $chapters->[$idx];
+				my $start = ($ch->{start_time} // 0) + 0;
+				my $end   = ($ch->{end_time}   // 0) + 0;
+				next unless $end > $start;
+
+				my $dur      = $end - $start;
+				my $chap_url = "${file_url}#${start}-${end}";
+				my $ctags    = _buildTagsFromProbe($path, $probe, undef, $ch->{tags}, $idx + 1);
+
+				$ctags->{CONTENT_TYPE} = $eff_type;
+				$ctags->{CHANNELS}     = $channels;
+				$ctags->{SECS}         = $dur;
+				$ctags->{AUDIO}        = 1;
+				$ctags->{VIRTUAL}      = 1;
+				$ctags->{COVER_LENGTH} = $cover_len if $cover_len;
+
+				if ($probe->{secs} && $probe->{secs} > 0 && $probe->{size}) {
+					my $byterate = $probe->{size} / $probe->{secs};
+					$ctags->{OFFSET} = int($byterate * $start);
+					$ctags->{SIZE}   = int($byterate * $dur);
+				}
+
+				if ($vtype && $prefs->get('append_title_tags') && $ctags->{TITLE}) {
+					my $badge = $probe->{badge};
+					if ($badge && $ctags->{TITLE} !~ /\Q$badge\E/) {
+						$ctags->{TITLE} .= " $badge";
+					}
+				}
+
+				Slim::Formats::sanitizeTagValues($ctags, $path);
+				Slim::Schema->updateOrCreate({
+					url        => $chap_url,
+					attributes => $ctags,
+					readTags   => 0,
+					commit     => 0,
+				});
+				$created++;
+			}
+
+			my $album_title = $probe->{tags}{ALBUM} || $probe->{tags}{TITLE};
+			if (!defined $album_title || !length $album_title) {
+				($album_title) = ($path =~ m{([^/\\]+)$});
+				$album_title =~ s/\.[^.]+$// if defined $album_title;
+			}
+
+			$log->info("Expanded multi-chapter MKA $path -> $created virtual tracks (type=$eff_type ch=$channels codec=$probe->{codec})");
+
+			my $base_tags = {
+				CONTENT_TYPE => 'cur',
+				AUDIO        => 0,
+				TITLE        => $album_title || $path,
+			};
+			return wantarray ? ($base_tags, 'cur') : $base_tags;
+		}
+
+		# Single-track .mka file (2ch stereo or multichannel/bitstream)
+		my $tags = _buildTagsFromProbe($path, $probe, undef);
+		$tags->{CONTENT_TYPE} = $eff_type;
+		$tags->{CHANNELS}     = $channels;
+		$tags->{COVER_LENGTH} = $cover_len if $cover_len;
+
+		if ($vtype && $prefs->get('append_title_tags') && $tags->{TITLE}) {
+			my $badge = $probe->{badge};
+			if ($badge && $tags->{TITLE} !~ /\Q$badge\E/) {
+				$tags->{TITLE} .= " $badge";
+			}
+		}
+
+		$log->info("Classified MKA $path -> type=$eff_type ch=$channels codec=$probe->{codec} profile=$probe->{profile}");
+		return wantarray ? ($tags, $eff_type) : $tags;
+	}
 
 	# Strictly preserve 1- and 2-channel non-bitstream files untouched
 	if (!$vtype && $channels <= 2) {
@@ -209,7 +351,7 @@ sub _probeFile {
 	my $ffprobe = $prefs->get('ffprobe_path') || 'ffprobe';
 	my $bin = Slim::Utils::Misc::findbin($ffprobe) || $ffprobe;
 
-	open my $pipe, '-|', $bin, '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', $path
+	open my $pipe, '-|', $bin, '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', '-show_chapters', $path
 		or do {
 			$log->warn("Failed to execute ffprobe ($bin) on $path: $!");
 			return undef;
@@ -226,11 +368,17 @@ sub _probeFile {
 		return undef;
 	}
 
-	my $audio_stream;
+	my ($audio_stream, $has_cover);
 	for my $s (@{ $data->{streams} }) {
-		if (($s->{codec_type} || '') eq 'audio') {
+		my $stype = $s->{codec_type} || '';
+		if (!$audio_stream && $stype eq 'audio') {
 			$audio_stream = $s;
-			last;
+		} elsif (!$has_cover && $stype eq 'video') {
+			my $disp   = ref $s->{disposition} eq 'HASH' ? $s->{disposition} : {};
+			my $vcodec = lc($s->{codec_name} || '');
+			if ($disp->{attached_pic} || $vcodec =~ /^(?:mjpeg|png|gif|bmp)$/) {
+				$has_cover = 1;
+			}
 		}
 	}
 	return undef unless $audio_stream;
@@ -277,9 +425,10 @@ sub _probeFile {
 		}
 	}
 
-	my $secs    = ($data->{format}{duration} || $audio_stream->{duration} || 0) + 0;
-	my $bitrate = int($audio_stream->{bit_rate} || $data->{format}{bit_rate} || 0);
-	my $size    = int($data->{format}{size} || (-s $path) || 0);
+	my $chapters = (ref $data->{chapters} eq 'ARRAY') ? $data->{chapters} : [];
+	my $secs     = ($data->{format}{duration} || $audio_stream->{duration} || 0) + 0;
+	my $bitrate  = int($audio_stream->{bit_rate} || $data->{format}{bit_rate} || 0);
+	my $size     = int($data->{format}{size} || (-s $path) || 0);
 
 	my $result = {
 		channels     => $channels,
@@ -291,6 +440,8 @@ sub _probeFile {
 		bitrate      => $bitrate,
 		size         => $size,
 		tags         => \%merged_tags,
+		chapters     => $chapters,
+		has_cover    => $has_cover ? 1 : 0,
 		virtual_type => $vtype,
 		badge        => $badge,
 	};
@@ -302,31 +453,52 @@ sub _probeFile {
 }
 
 sub _buildTagsFromProbe {
-	my ($path, $probe, $base) = @_;
+	my ($path, $probe, $base, $chap_tags, $chap_num) = @_;
 	my %tags = ref $base eq 'HASH' ? %$base : ();
-	my $pt   = $probe->{tags} || {};
+	my %pt   = %{ $probe->{tags} || {} };
 
-	for my $key (qw(TITLE ARTIST ALBUM ALBUMARTIST COMPOSER GENRE DATE YEAR COMMENT DISCNUMBER)) {
-		if (!defined $tags{$key} && defined $pt->{$key}) {
-			$tags{$key} = $pt->{$key};
+	if (ref $chap_tags eq 'HASH') {
+		# Container-level TITLE in multi-chapter MKA is the album title, not the track title
+		delete $pt{TITLE};
+		while (my ($k, $v) = each %$chap_tags) {
+			$pt{ uc($k) } = $v if defined $v && length $v;
 		}
 	}
 
-	if (!defined $tags{YEAR} && defined $pt->{DATE} && $pt->{DATE} =~ /^(\d{4})/) {
-		$tags{YEAR} = $1;
+	$pt{ALBUMARTIST} //= $pt{ALBUM_ARTIST} if defined $pt{ALBUM_ARTIST};
+
+	for my $key (qw(TITLE ARTIST ALBUM ALBUMARTIST COMPOSER GENRE DATE YEAR COMMENT DISCNUMBER)) {
+		if (!defined $tags{$key} && defined $pt{$key}) {
+			$tags{$key} = $pt{$key};
+		}
+	}
+
+	if (!defined $tags{YEAR}) {
+		for my $dkey (qw(YEAR DATE DATE_RECORDED DATE_RELEASED ORIGINAL_DATE)) {
+			if (defined $pt{$dkey} && $pt{$dkey} =~ /^(\d{4})/) {
+				$tags{YEAR} = $1;
+				last;
+			}
+		}
 	}
 
 	if (!defined $tags{TRACKNUM}) {
-		my $trk = $pt->{TRACK} // $pt->{TRACKNUMBER};
+		my $trk = $pt{TRACK} // $pt{TRACKNUMBER} // $pt{PART_NUMBER};
 		if (defined $trk && $trk =~ /^(\d+)/) {
 			$tags{TRACKNUM} = int($1);
+		} elsif (defined $chap_num) {
+			$tags{TRACKNUM} = int($chap_num);
 		}
 	}
 
 	if (!defined $tags{TITLE} || !length $tags{TITLE}) {
-		my ($name) = ($path =~ m{([^/\\]+)$});
-		$name =~ s/\.[^.]+$// if defined $name;
-		$tags{TITLE} = $name || $path;
+		if (defined $chap_num) {
+			$tags{TITLE} = "Track $chap_num";
+		} else {
+			my ($name) = ($path =~ m{([^/\\]+)$});
+			$name =~ s/\.[^.]+$// if defined $name;
+			$tags{TITLE} = $name || $path;
+		}
 	}
 
 	$tags{CHANNELS}   ||= $probe->{channels};
