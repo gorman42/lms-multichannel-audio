@@ -995,21 +995,170 @@ sub _detect_bitstream_profile {
 	return '';
 }
 
+# Validate a candidate Cluster file offset and return its timestamp in seconds (or undef)
+sub _probe_cluster_at {
+	my ($fh, $pos, $seg_end, $scale) = @_;
+	return undef if !defined $pos || $pos < 0 || ($pos + 12) >= $seg_end;
+	seek($fh, $pos, SEEK_SET) or return undef;
+
+	my $cid = _fh_read_id($fh);
+	return undef unless defined $cid && $cid == ID_CLUSTER;
+	my ($csz, $unk) = _fh_read_size($fh);
+	return undef unless defined $csz;
+
+	my $cdata_start = tell($fh);
+	my $cend = (!$unk && ($cdata_start + $csz) <= $seg_end)
+		? ($cdata_start + $csz)
+		: $seg_end;
+	my $scan_limit = $cdata_start + 64;
+	$scan_limit = $cend if $cend < $scan_limit;
+
+	while (tell($fh) < $scan_limit) {
+		my $id = _fh_read_id($fh) // return undef;
+		my ($sz, $bunk) = _fh_read_size($fh);
+		return undef unless defined $sz && !$bunk;
+		my $dpos = tell($fh);
+		return undef if ($dpos + $sz) > $cend;
+
+		if ($id == ID_CLUSTER_TIMECODE) {
+			return undef if $sz < 1 || $sz > 8;
+			my $tc_bytes;
+			return undef unless read($fh, $tc_bytes, $sz) == $sz;
+			# Verify next element inside Cluster has a valid Matroska Cluster-child ID
+			if (($dpos + $sz + 2) <= $cend) {
+				my $nid = _fh_read_id($fh);
+				return undef unless defined $nid && (
+					$nid == ID_SIMPLE_BLOCK || $nid == ID_BLOCK_GROUP ||
+					$nid == 0xA7 || $nid == 0xAB || $nid == 0x5854 ||
+					$nid == ID_CRC32 || $nid == ID_VOID
+				);
+			}
+			return (_decode_uint($tc_bytes) * $scale) / 1_000_000_000;
+		}
+		seek($fh, $dpos + $sz, SEEK_SET);
+	}
+	return undef;
+}
+
+# Scan near $approx_pos within [$min_pos, $max_pos] for a valid Cluster header
+sub _find_nearest_cluster {
+	my ($fh, $approx_pos, $min_pos, $max_pos, $seg_end, $scale) = @_;
+	my $win_start = $approx_pos - 65536;
+	$win_start = $min_pos if $win_start < $min_pos;
+	my $win_end = $approx_pos + 262144;
+	$win_end = $max_pos if $win_end > $max_pos;
+	return (undef, undef) if $win_end <= $win_start + 8;
+
+	my $read_len = $win_end - $win_start;
+	seek($fh, $win_start, SEEK_SET) or return (undef, undef);
+	my $buf;
+	my $got = read($fh, $buf, $read_len);
+	return (undef, undef) unless defined $got && $got > 8;
+
+	my $sig = pack('N', ID_CLUSTER);
+	my $search_from = 0;
+	while ((my $idx = index($buf, $sig, $search_from)) >= 0) {
+		my $cand = $win_start + $idx;
+		$search_from = $idx + 1;
+		next if $cand < $min_pos || $cand >= $max_pos;
+		my $tc = _probe_cluster_at($fh, $cand, $seg_end, $scale);
+		return ($cand, $tc) if defined $tc;
+	}
+	return (undef, undef);
+}
+
+# Binary search file byte offsets for the latest Cluster with timestamp <= $target_sec
+sub _binary_search_cluster {
+	my ($meta, $lo, $hi, $best_pos, $best_sec, $target_sec) = @_;
+	my $path = $meta->{path} or return $best_pos;
+	open my $fh, '<:raw', $path or return $best_pos;
+
+	my $seg_end = $meta->{seg_end}        || $meta->{file_size} || 0;
+	my $scale   = $meta->{timecode_scale} || 1_000_000;
+
+	while (($hi - $lo) > 262144) {
+		my $mid = int(($lo + $hi) / 2);
+		my ($cpos, $csec) = _find_nearest_cluster($fh, $mid, $lo, $hi, $seg_end, $scale);
+		if (!defined $cpos) {
+			# Either inside a single large cluster or past the final cluster (trailing Cues/Tags/Attachments)
+			my $next_hi = $mid - 65536;
+			last if $next_hi <= $lo;
+			$hi = $next_hi;
+			next;
+		}
+		if ($csec <= $target_sec) {
+			if ($cpos >= $best_pos) {
+				$best_pos = $cpos;
+				$best_sec = $csec;
+			}
+			$lo = $cpos + 4;
+		} else {
+			$hi = $cpos;
+		}
+	}
+
+	# Linearly scan remaining <= 256 KB window to pick the closest cluster <= $target_sec
+	my $scan = $best_pos > $lo ? $best_pos : $lo;
+	while ($scan < $hi) {
+		my ($cpos, $csec) = _find_nearest_cluster($fh, $scan, $scan, $hi, $seg_end, $scale);
+		last unless defined $cpos;
+		if ($csec <= $target_sec) {
+			$best_pos = $cpos;
+			$best_sec = $csec;
+			$scan = $cpos + 4;
+		} else {
+			last;
+		}
+	}
+
+	close $fh;
+
+	# Cache discovered cue point in $meta->{cues} so repeated jumps are O(1)
+	if (defined $best_pos && defined $best_sec && $best_pos > ($meta->{first_cluster} || 0)) {
+		my $cues = $meta->{cues} ||= [];
+		if (!grep { $_->{cluster_pos} == $best_pos } @$cues) {
+			push @$cues, {
+				time_ticks  => int(($best_sec * 1_000_000_000) / $scale),
+				time_ns     => int($best_sec * 1_000_000_000),
+				time_sec    => $best_sec,
+				track       => $meta->{track_number},
+				cluster_pos => $best_pos,
+			};
+			@$cues = sort { $a->{time_ns} <=> $b->{time_ns} } @$cues;
+		}
+	}
+
+	return $best_pos;
+}
+
 # Find the file byte offset of the Cluster at or immediately before $target_sec
 sub find_cluster_offset_for_time {
 	my ($class, $meta, $target_sec) = @_;
 	return $meta->{first_cluster} unless defined $target_sec && $target_sec > 0;
 
-	my $cues = $meta->{cues} || [];
-	my $best = $meta->{first_cluster};
+	my $cues      = $meta->{cues} || [];
+	my $best_pos  = $meta->{first_cluster};
+	my $best_sec  = 0;
+	my $upper_pos = $meta->{seg_end} || $meta->{file_size} || 0;
+
 	for my $cue (@$cues) {
 		if ($cue->{time_sec} <= $target_sec) {
-			$best = $cue->{cluster_pos};
+			$best_pos = $cue->{cluster_pos};
+			$best_sec = $cue->{time_sec};
 		} else {
+			$upper_pos = $cue->{cluster_pos} if $cue->{cluster_pos} < $upper_pos;
 			last;
 		}
 	}
-	return $best;
+
+	# If Cues were absent or sparse (> 5s gap), binary-search directly to the target Cluster
+	if (defined $best_pos && defined $upper_pos && ($upper_pos - $best_pos) > 262144
+		&& (!@$cues || ($target_sec - $best_sec) > 5.0))
+	{
+		$best_pos = _binary_search_cluster($meta, $best_pos, $upper_pos, $best_pos, $best_sec, $target_sec);
+	}
+
+	return $best_pos;
 }
 
 # CLI self-test helper: perl Format/Matroska.pm /path/to/file.mka [start_sec] [end_sec]

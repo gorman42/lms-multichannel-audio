@@ -294,6 +294,11 @@ sub _installHooks {
 				my $capable  = $client ? _syncGroupSupports($client, $ctype, $channels) : 0;
 
 				my @args = @_;
+				if ($track && blessed($track) && $track->can('url') && ($track->url || '') !~ m{^mka://}i) {
+					if (ref $streamModes eq 'ARRAY') {
+						$args[2] = [ grep { $_ ne 'I' } @$streamModes ];
+					}
+				}
 				if ($capable) {
 					# Force native bitstream or multichannel FLAC rule instead of stereo 'flc' fallback
 					$args[5] ||= ($ctype eq 'mchflc') ? 'flc' : $ctype;
