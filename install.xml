@@ -3,7 +3,7 @@
     <name>PLUGIN_MULTICHANNEL_AUDIO</name>
     <module>Plugins::MultichannelAudio::Plugin</module>
     <importmodule>Plugins::MultichannelAudio::Plugin</importmodule>
-    <version>1.1.0</version>
+    <version>1.2.0</version>
     <description>PLUGIN_MULTICHANNEL_AUDIO_DESC</description>
     <creator>MultichannelAudio</creator>
     <defaultState>enabled</defaultState>
