@@ -3,13 +3,15 @@ package Plugins::MultichannelAudio::Format::Wrapper;
 use strict;
 use warnings;
 
+use Slim::Formats;
 use base qw(Slim::Formats);
 
 use JSON::XS ();
-use Slim::Formats;
 use Slim::Utils::Log;
 use Slim::Utils::Misc;
 use Slim::Utils::Prefs;
+
+use Plugins::MultichannelAudio::Format::Matroska;
 
 our $AUTOLOAD;
 
@@ -99,6 +101,18 @@ sub _extractMkaCoverArt {
 	my ($path) = @_;
 	return undef unless defined $path && -f $path;
 
+	if (defined $cached_path && $cached_path eq $path && ref $cached_probe eq 'HASH' && defined $cached_probe->{cover_art}) {
+		return length($cached_probe->{cover_art}) > 0 ? $cached_probe->{cover_art} : undef;
+	}
+
+	my $meta = eval { Plugins::MultichannelAudio::Format::Matroska->parse($path, { with_cover => 1 }) };
+	if ($meta) {
+		if (defined $cached_path && $cached_path eq $path && ref $cached_probe eq 'HASH') {
+			$cached_probe->{cover_art} = $meta->{cover_art} // '';
+		}
+		return (defined $meta->{cover_art} && length($meta->{cover_art}) > 0) ? $meta->{cover_art} : undef;
+	}
+
 	my $ffprobe = $prefs->get('ffprobe_path') || 'ffprobe';
 	my $ffmpeg  = $ffprobe;
 	$ffmpeg =~ s/ffprobe(\.exe)?$/ffmpeg$1/i;
@@ -133,6 +147,9 @@ sub getCoverArt {
 
 sub getTag {
 	my ($class, $url, $anchor) = @_;
+	if (!defined $anchor && defined $url && $url =~ /#([^#]+)$/) {
+		$anchor = $1;
+	}
 	my $path = _urlToPath($url);
 
 	if (!$path || !-f $path) {
@@ -195,9 +212,12 @@ sub getTag {
 
 			my $file_url = ($url =~ m{^file://}i) ? $url : Slim::Utils::Misc::fileURLFromPath($path);
 			$file_url =~ s/#[^#]+$//;
+			my $mka_url = $file_url;
+			$mka_url =~ s{^file://}{mka://}i;
 
 			eval {
 				Slim::Schema->search('Track', { url => { like => "$file_url#%" } })->delete_all;
+				Slim::Schema->search('Track', { url => { like => "$mka_url#%" } })->delete_all;
 			};
 
 			my $created = 0;
@@ -208,7 +228,7 @@ sub getTag {
 				next unless $end > $start;
 
 				my $dur      = $end - $start;
-				my $chap_url = "${file_url}#${start}-${end}";
+				my $chap_url = "${mka_url}#${start}-${end}";
 				my $ctags    = _buildTagsFromProbe($path, $probe, undef, $ch->{tags}, $idx + 1);
 
 				$ctags->{CONTENT_TYPE} = $eff_type;
@@ -218,7 +238,13 @@ sub getTag {
 				$ctags->{VIRTUAL}      = 1;
 				$ctags->{COVER_LENGTH} = $cover_len if $cover_len;
 
-				if ($probe->{secs} && $probe->{secs} > 0 && $probe->{size}) {
+				if ($probe->{cues} && @{ $probe->{cues} }) {
+					my $c_start = Plugins::MultichannelAudio::Format::Matroska->find_cluster_offset_for_time($probe, $start);
+					my $c_end   = Plugins::MultichannelAudio::Format::Matroska->find_cluster_offset_for_time($probe, $end);
+					$c_end      = $probe->{seg_end} if !defined $c_end || $c_end <= $c_start;
+					$ctags->{OFFSET} = int($c_start);
+					$ctags->{SIZE}   = int($c_end - $c_start);
+				} elsif ($probe->{secs} && $probe->{secs} > 0 && $probe->{size}) {
 					my $byterate = $probe->{size} / $probe->{secs};
 					$ctags->{OFFSET} = int($byterate * $start);
 					$ctags->{SIZE}   = int($byterate * $dur);
@@ -270,6 +296,46 @@ sub getTag {
 			}
 		}
 
+		# Route multichannel/bitstream single-track .mka through mka:// virtual track for direct Perl streaming
+		if ($vtype && (!defined $url || $url !~ m{^mka://}i)) {
+			my $file_url = ($url && $url =~ m{^file://}i) ? $url : Slim::Utils::Misc::fileURLFromPath($path);
+			$file_url =~ s/#[^#]+$//;
+			my $mka_url = $file_url;
+			$mka_url =~ s{^file://}{mka://}i;
+
+			eval {
+				Slim::Schema->search('Track', { url => { like => "$file_url#%" } })->delete_all;
+				Slim::Schema->search('Track', { url => { like => "$mka_url#%" } })->delete_all;
+			};
+
+			my $end_sec = ($probe->{secs} || 0) + 0;
+			my $vurl    = "${mka_url}#0-${end_sec}";
+			my %vtags   = %$tags;
+			$vtags{AUDIO}   = 1;
+			$vtags{VIRTUAL} = 1;
+			if (defined $probe->{first_cluster} && defined $probe->{seg_end} && $probe->{seg_end} > $probe->{first_cluster}) {
+				$vtags{OFFSET} = int($probe->{first_cluster});
+				$vtags{SIZE}   = int($probe->{seg_end} - $probe->{first_cluster});
+			}
+
+			Slim::Formats::sanitizeTagValues(\%vtags, $path);
+			Slim::Schema->updateOrCreate({
+				url        => $vurl,
+				attributes => \%vtags,
+				readTags   => 0,
+				commit     => 0,
+			});
+
+			$log->info("Classified MKA $path -> virtual mka:// track (type=$eff_type ch=$channels codec=$probe->{codec} profile=$probe->{profile})");
+
+			my $base_tags = {
+				CONTENT_TYPE => 'cur',
+				AUDIO        => 0,
+				TITLE        => $tags->{TITLE} || $path,
+			};
+			return wantarray ? ($base_tags, 'cur') : $base_tags;
+		}
+
 		$log->info("Classified MKA $path -> type=$eff_type ch=$channels codec=$probe->{codec} profile=$probe->{profile}");
 		return wantarray ? ($tags, $eff_type) : $tags;
 	}
@@ -309,8 +375,10 @@ sub getTag {
 sub _urlToPath {
 	my ($url) = @_;
 	return undef unless defined $url;
-	if ($url =~ m{^file://}i) {
-		return Slim::Utils::Misc::pathFromFileURL($url);
+	if ($url =~ m{^(?:file|mka)://}i) {
+		my $furl = $url;
+		$furl =~ s{^mka://}{file://}i;
+		return Slim::Utils::Misc::pathFromFileURL($furl);
 	}
 	return $url;
 }
@@ -346,6 +414,74 @@ sub _probeFile {
 	my ($path) = @_;
 	if (defined $cached_path && $cached_path eq $path) {
 		return $cached_probe;
+	}
+
+	if ($path =~ /\.mka$/i) {
+		my $meta = eval { Plugins::MultichannelAudio::Format::Matroska->parse($path) };
+		if ($meta) {
+			my $channels = int($meta->{channels} || 2);
+			my $codec    = lc($meta->{codec} || '');
+			my $profile  = lc($meta->{profile} || '');
+			my $rate     = int($meta->{sample_rate} || 0);
+			my $bps      = int($meta->{sample_size} || 0);
+
+			my %merged_tags;
+			if (ref $meta->{tags} eq 'HASH') {
+				while (my ($k, $v) = each %{ $meta->{tags} }) {
+					$merged_tags{ uc($k) } = $v if defined $v && length $v;
+				}
+			}
+
+			my ($vtype, $badge);
+			if ($codec eq 'truehd' && $profile =~ /atmos/) {
+				$vtype = 'thd';
+				$badge = '[Atmos]';
+			} elsif ($codec eq 'eac3' && $profile =~ /atmos/) {
+				$vtype = 'ec3';
+				$badge = '[Atmos]';
+			} elsif ($codec eq 'dts' && $profile =~ /dts-hd ma/) {
+				$vtype = 'dtshd';
+				my $hint = join(' ', values %merged_tags);
+				$badge = ($hint =~ /auro[\s\-_]?3d/i) ? '[Auro-3D]' : '[DTS-HD MA]';
+			} elsif ($channels > 2) {
+				$vtype = 'mchflc';
+				if ($channels == 6) {
+					$badge = '[5.1]';
+				} elsif ($channels == 8) {
+					$badge = '[7.1]';
+				} else {
+					$badge = "[${channels}ch]";
+				}
+			}
+
+			my $result = {
+				channels       => $channels,
+				codec          => $codec,
+				codec_id       => $meta->{codec_id},
+				profile        => $profile,
+				sample_rate    => $rate,
+				sample_size    => $bps,
+				secs           => ($meta->{secs} || 0) + 0,
+				bitrate        => int($meta->{bitrate} || 0),
+				size           => int($meta->{size} || (-s $path) || 0),
+				tags           => \%merged_tags,
+				chapters       => $meta->{chapters} || [],
+				cues           => $meta->{cues} || [],
+				first_cluster  => $meta->{first_cluster},
+				seg_data_start => $meta->{seg_data_start},
+				seg_end        => $meta->{seg_end},
+				timecode_scale => $meta->{timecode_scale},
+				track_number   => $meta->{track_number},
+				has_cover      => $meta->{has_cover} ? 1 : 0,
+				virtual_type   => $vtype,
+				badge          => $badge,
+			};
+
+			$cached_path  = $path;
+			$cached_probe = $result;
+
+			return $result;
+		}
 	}
 
 	my $ffprobe = $prefs->get('ffprobe_path') || 'ffprobe';

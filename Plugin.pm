@@ -44,6 +44,9 @@ my $orig_getConvertCommand2;
 my $orig_canDirectStream;
 my $orig_stream_s;
 my $orig_local_deleted;
+my $orig_isValidRemoteHandler;
+my $orig_pathFromFileURL;
+my $orig_isFileURL;
 
 sub initPlugin {
 	my $class = shift;
@@ -144,6 +147,57 @@ sub _installHooks {
 		$Slim::Formats::loadedTagClasses{$vtype} = 1;
 	}
 
+	# Register custom mka:// protocol handler for direct Perl EBML access-unit streaming
+	require Slim::Player::ProtocolHandlers;
+	require Plugins::MultichannelAudio::ProtocolHandler::ProtocolHandler_Matroska;
+	Slim::Player::ProtocolHandlers->registerHandler(
+		'mka',
+		'Plugins::MultichannelAudio::ProtocolHandler::ProtocolHandler_Matroska'
+	);
+
+	# Mark mka:// as a local protocol in Slim::Music::Info::isRemoteURL so Slim::Schema
+	# persists virtual chapter/bitstream tracks in the SQLite library instead of RemoteTrack.
+	if (!$orig_isValidRemoteHandler) {
+		my $coderef = Slim::Player::ProtocolHandlers->can('isValidRemoteHandler');
+		if ($coderef) {
+			$orig_isValidRemoteHandler = $coderef;
+			*Slim::Player::ProtocolHandlers::isValidRemoteHandler = sub {
+				my ($self, $protocol) = @_;
+				return 0 if defined $protocol && lc($protocol) eq 'mka';
+				return $orig_isValidRemoteHandler->(@_);
+			};
+		}
+	}
+
+	# Resolve mka:// URLs to local filesystem paths in Slim::Utils::Misc::pathFromFileURL
+	# and Slim::Music::Info::isFileURL so Artwork, ImageResizer, and Track->path find
+	# both embedded MKV cover art and standalone folder cover.jpg/folder.jpg images.
+	if (!$orig_pathFromFileURL) {
+		my $coderef = Slim::Utils::Misc->can('pathFromFileURL');
+		if ($coderef) {
+			$orig_pathFromFileURL = $coderef;
+			*Slim::Utils::Misc::pathFromFileURL = sub {
+				my ($url, @rest) = @_;
+				if (defined $url && !ref $url && $url =~ m{^mka://}i) {
+					$url =~ s{^mka://}{file://}i;
+				}
+				return $orig_pathFromFileURL->($url, @rest);
+			};
+		}
+	}
+
+	if (!$orig_isFileURL) {
+		my $coderef = Slim::Music::Info->can('isFileURL');
+		if ($coderef) {
+			$orig_isFileURL = $coderef;
+			*Slim::Music::Info::isFileURL = sub {
+				my ($url, @rest) = @_;
+				return 1 if defined $url && !ref $url && $url =~ m{^mka://}i;
+				return $orig_isFileURL->($url, @rest);
+			};
+		}
+	}
+
 	# 1. Intercept Slim::Formats->classForFormat:
 	#    - Always for new virtual/container types (mchflc, ec3, thd, dtshd, mka, wv, ac3, dts)
 	#    - For native stereo types (flc, mp4, alc, etc.) ONLY while library scanning is active,
@@ -181,10 +235,12 @@ sub _installHooks {
 				if (defined $url && !ref $url && $url =~ /\.mka$/i) {
 					my $dbh = eval { Slim::Schema->dbh };
 					if ($dbh) {
+						my $mka_url = $url;
+						$mka_url =~ s{^file://}{mka://}i;
 						my $sth = $dbh->prepare_cached(
-							'SELECT url FROM tracks WHERE url LIKE ? AND `virtual` = 1'
+							'SELECT url FROM tracks WHERE (url LIKE ? OR url LIKE ?) AND `virtual` = 1'
 						);
-						$sth->execute("$url#%");
+						$sth->execute("$url#%", "$mka_url#%");
 						my @vurls;
 						while (my ($vurl) = $sth->fetchrow_array) {
 							push @vurls, $vurl;
@@ -356,6 +412,9 @@ sub _removeHooks {
 	*Slim::Player::Squeezebox2::canDirectStream          = $orig_canDirectStream     if $orig_canDirectStream;
 	*Slim::Player::Squeezebox2::stream_s                 = $orig_stream_s            if $orig_stream_s;
 	*Slim::Utils::Scanner::Local::deleted                = $orig_local_deleted       if $orig_local_deleted;
+	*Slim::Player::ProtocolHandlers::isValidRemoteHandler = $orig_isValidRemoteHandler if $orig_isValidRemoteHandler;
+	*Slim::Utils::Misc::pathFromFileURL                  = $orig_pathFromFileURL     if $orig_pathFromFileURL;
+	*Slim::Music::Info::isFileURL                        = $orig_isFileURL           if $orig_isFileURL;
 }
 
 sub playerCapabilities {
