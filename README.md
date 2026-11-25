@@ -69,7 +69,7 @@ Add the following repository URL in LMS under **Settings > Plugins > Additional 
 | `.mka` (single & chaptered) | Dolby TrueHD Atmos | Raw Passthrough (`mka://`, `# I`) | 2ch FLAC Downmix (`# I` / `# FT`) |
 | `.mka` (single & chaptered) | Dolby Digital Plus Atmos (E-AC-3 JOC) | Raw Passthrough (`mka://`, `# I`) | 2ch FLAC Downmix (`# I` / `# FT`) |
 | `.mka` (single & chaptered) | DTS-HD Master Audio | Raw Passthrough (`mka://`, `# I`) | 2ch FLAC Downmix (`# I` / `# FT`) |
-| `.m4a` / `.mp4` | E-AC-3 / DTS-HD MA | Transmux | Dolby TrueHD Atmos (`# FT`) | 2ch FLAC Downmix + Resample (`# FT`) |
+| `.m4a` / `.mp4` | E-AC-3 / DTS-HD MA/Dolby TrueHD Atmos | Transmux (`# FT`) | 2ch FLAC Downmix + Resample (`# FT`) |
 | `.flac` | Multichannel LPCM (5.1 / 7.1) | Native LPCM | 2ch FLAC Downmix + Resample |
 
 ---
