@@ -982,17 +982,210 @@ sub _detect_bitstream_profile {
 		return 'DTS';
 	}
 
-	# E-AC-3 JOC (Atmos) detection: check if addbsi / complex metadata is present
+	# E-AC-3 JOC (Atmos) detection via ETSI TS 102 366 / TS 103 420 bit-level BSI parser
 	if ($codec_id eq 'A_EAC3' && length($frame) >= 8) {
-		# E-AC-3 sync word 0x0B77
 		if (substr($frame, 0, 2) eq "\x0B\x77") {
-			# Check for E-AC-3 JOC signature or complex channel config
-			return 'Dolby Digital Plus + Dolby Atmos' if index($frame, "\x01\x10") >= 0;
+			return 'Dolby Digital Plus + Dolby Atmos' if _eac3_frame_has_joc($frame);
 		}
 		return 'Dolby Digital Plus';
 	}
 
 	return '';
+}
+
+sub _eac3_frame_has_joc {
+	my ($frame) = @_;
+	my $len = length($frame);
+	return 0 if $len < 8;
+
+	# Build bit array over the E-AC-3 header (first 64 bytes is always well past BSI/addbsi)
+	my $scan_len = $len > 64 ? 64 : $len;
+	my @bits;
+	for my $i (0 .. $scan_len - 1) {
+		my $b = ord(substr($frame, $i, 1));
+		for my $sh (reverse 0 .. 7) {
+			push @bits, ($b >> $sh) & 1;
+		}
+	}
+	my $nbits = scalar(@bits);
+	my $pos = 0;
+
+	my $read_bits = sub {
+		my ($n) = @_;
+		return undef if ($pos + $n) > $nbits;
+		my $v = 0;
+		for (1 .. $n) {
+			$v = ($v << 1) | $bits[$pos++];
+		}
+		return $v;
+	};
+
+	my $sync = $read_bits->(16);
+	return 0 unless defined $sync && $sync == 0x0B77;
+
+	my $strmtyp = $read_bits->(2);      # 0=indep, 1=dep, 2=ac3_conv, 3=reserved
+	my $substreamid = $read_bits->(3);
+	my $frmsiz = $read_bits->(11);
+	return 0 if !defined $frmsiz || ($strmtyp // 3) == 3;
+
+	my $fscod = $read_bits->(2);
+	return 0 unless defined $fscod;
+	my $num_blocks = 6;
+	if ($fscod == 3) {
+		my $fscod2 = $read_bits->(2);
+		return 0 unless defined $fscod2;
+	} else {
+		my $numblkscod = $read_bits->(2);
+		return 0 unless defined $numblkscod;
+		my @blk_map = (1, 2, 3, 6);
+		$num_blocks = $blk_map[$numblkscod];
+	}
+
+	my $acmod = $read_bits->(3);
+	my $lfeon = $read_bits->(1);
+	my $bsid  = $read_bits->(5);
+	return 0 unless defined $acmod && defined $lfeon && defined $bsid && $bsid > 10 && $bsid <= 16;
+
+	my $n_ch_sets = ($acmod == 0) ? 2 : 1;
+	for (1 .. $n_ch_sets) {
+		my $dialnorm = $read_bits->(5);
+		my $compre   = $read_bits->(1);
+		return 0 unless defined $dialnorm && defined $compre;
+		if ($compre) {
+			return 0 unless defined $read_bits->(8); # compr
+		}
+	}
+
+	if ($strmtyp == 1) {
+		my $chanmape = $read_bits->(1);
+		return 0 unless defined $chanmape;
+		if ($chanmape) {
+			return 0 unless defined $read_bits->(16); # chanmap
+		}
+	}
+
+	my $mixmdate = $read_bits->(1);
+	return 0 unless defined $mixmdate;
+	if ($mixmdate) {
+		if ($acmod > 2) {
+			return 0 unless defined $read_bits->(2); # dmixmod
+		}
+		if (($acmod & 1) && ($acmod > 2)) {
+			return 0 unless defined $read_bits->(6); # ltrtcmixlev + lorocmixlev
+		}
+		if ($acmod & 4) {
+			return 0 unless defined $read_bits->(6); # ltrtsurmixlev + lorosurmixlev
+		}
+		if ($lfeon) {
+			my $lfemixlevcode = $read_bits->(1);
+			return 0 unless defined $lfemixlevcode;
+			if ($lfemixlevcode) {
+				return 0 unless defined $read_bits->(5); # lfemixlevcod
+			}
+		}
+		if ($strmtyp == 0) {
+			for (1 .. $n_ch_sets) {
+				my $pgmscle = $read_bits->(1);
+				return 0 unless defined $pgmscle;
+				if ($pgmscle) {
+					return 0 unless defined $read_bits->(6);
+				}
+			}
+			my $extpgmscle = $read_bits->(1);
+			return 0 unless defined $extpgmscle;
+			if ($extpgmscle) {
+				return 0 unless defined $read_bits->(6);
+			}
+
+			my $mixdef = $read_bits->(2);
+			return 0 unless defined $mixdef;
+			if ($mixdef == 1) {
+				return 0 unless defined $read_bits->(5);
+			} elsif ($mixdef == 2) {
+				return 0 unless defined $read_bits->(12);
+			} elsif ($mixdef == 3) {
+				my $mixdeflen = $read_bits->(5);
+				return 0 unless defined $mixdeflen;
+				return 0 unless defined $read_bits->(($mixdeflen + 2) * 8);
+			}
+
+			if ($acmod < 2) {
+				for (1 .. $n_ch_sets) {
+					my $paninfoe = $read_bits->(1);
+					return 0 unless defined $paninfoe;
+					if ($paninfoe) {
+						return 0 unless defined $read_bits->(14);
+					}
+				}
+			}
+
+			my $frmmixcfginfoe = $read_bits->(1);
+			return 0 unless defined $frmmixcfginfoe;
+			if ($frmmixcfginfoe) {
+				if ($num_blocks == 1) {
+					return 0 unless defined $read_bits->(5);
+				} else {
+					for (1 .. $num_blocks) {
+						my $blkmixcfginfoe = $read_bits->(1);
+						return 0 unless defined $blkmixcfginfoe;
+						if ($blkmixcfginfoe) {
+							return 0 unless defined $read_bits->(5);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	my $infomdate = $read_bits->(1);
+	return 0 unless defined $infomdate;
+	if ($infomdate) {
+		my $bsmod = $read_bits->(3);
+		return 0 unless defined $bsmod;
+		return 0 unless defined $read_bits->(2); # copyrightb + origbs
+		if ($acmod == 2) {
+			return 0 unless defined $read_bits->(4); # dsurmod + dheadphonmod
+		}
+		if ($acmod >= 6) {
+			return 0 unless defined $read_bits->(2); # dsurexmod
+		}
+		for (1 .. $n_ch_sets) {
+			my $audprodie = $read_bits->(1);
+			return 0 unless defined $audprodie;
+			if ($audprodie) {
+				return 0 unless defined $read_bits->(8);
+			}
+		}
+		if ($fscod != 3) {
+			return 0 unless defined $read_bits->(1); # sourcefscod
+		}
+	}
+
+	if ($strmtyp == 0 && $num_blocks != 6) {
+		return 0 unless defined $read_bits->(1); # convsync
+	}
+	if ($strmtyp == 2) {
+		my $blkid = 1;
+		if ($fscod != 3) {
+			my $b = $read_bits->(1);
+			return 0 unless defined $b;
+			$blkid = $b;
+		}
+		if ($blkid) {
+			return 0 unless defined $read_bits->(6); # frmsizecod
+		}
+	}
+
+	my $addbsie = $read_bits->(1);
+	return 0 unless defined $addbsie && $addbsie == 1;
+
+	my $addbsil = $read_bits->(6);
+	return 0 unless defined $addbsil && $addbsil >= 1;
+
+	# First byte of addbsi: LSB (bit 0) is flag_ec3_extension_type_a (Atmos JOC)
+	my $ext_byte0 = $read_bits->(8);
+	return 0 unless defined $ext_byte0;
+	return ($ext_byte0 & 0x01) ? 1 : 0;
 }
 
 # Validate a candidate Cluster file offset and return its timestamp in seconds (or undef)

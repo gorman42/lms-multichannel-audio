@@ -47,6 +47,7 @@ my $orig_local_deleted;
 my $orig_isValidRemoteHandler;
 my $orig_pathFromFileURL;
 my $orig_isFileURL;
+my $orig_image_resize;
 
 sub initPlugin {
 	my $class = shift;
@@ -194,6 +195,29 @@ sub _installHooks {
 				my ($url, @rest) = @_;
 				return 1 if defined $url && !ref $url && $url =~ m{^mka://}i;
 				return $orig_isFileURL->($url, @rest);
+			};
+		}
+	}
+
+	# Intercept Slim::Utils::ImageResizer::resize for .mka files so both the scanner
+	# (precacheAllArtwork) and live web UI (Slim::Web::Graphics) receive raw embedded
+	# cover art bytes instead of passing .mka paths to Audio::Scan / GDResizer.
+	if (!$orig_image_resize) {
+		eval { require Slim::Utils::ImageResizer };
+		my $coderef = Slim::Utils::ImageResizer->can('resize');
+		if ($coderef) {
+			$orig_image_resize = $coderef;
+			*Slim::Utils::ImageResizer::resize = sub {
+				my ($class, $file, @rest) = @_;
+				if (defined $file && !ref $file && $file =~ /\.mka(?:#[^#]+)?$/i) {
+					my $mka_path = $file;
+					$mka_path =~ s/#[^#]+$//;
+					my $art = Plugins::MultichannelAudio::Format::Wrapper::_extractMkaCoverArt($mka_path);
+					if (defined $art && length($art) > 0) {
+						return $orig_image_resize->($class, \$art, @rest);
+					}
+				}
+				return $orig_image_resize->($class, $file, @rest);
 			};
 		}
 	}
@@ -420,6 +444,7 @@ sub _removeHooks {
 	*Slim::Player::ProtocolHandlers::isValidRemoteHandler = $orig_isValidRemoteHandler if $orig_isValidRemoteHandler;
 	*Slim::Utils::Misc::pathFromFileURL                  = $orig_pathFromFileURL     if $orig_pathFromFileURL;
 	*Slim::Music::Info::isFileURL                        = $orig_isFileURL           if $orig_isFileURL;
+	*Slim::Utils::ImageResizer::resize                   = $orig_image_resize       if $orig_image_resize;
 }
 
 sub playerCapabilities {

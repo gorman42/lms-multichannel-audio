@@ -200,7 +200,10 @@ sub getTag {
 						$ctags->{CONTENT_TYPE} = $eff_type;
 						$ctags->{CHANNELS}     = $channels;
 						$ctags->{SECS}         = $ce - $cs;
-						$ctags->{COVER_LENGTH} = $cover_len if $cover_len;
+						if ($cover_len) {
+							$ctags->{COVER_LENGTH} = $cover_len;
+							$ctags->{COVER}        = $cover_len;
+						}
 						if ($vtype && $prefs->get('append_title_tags') && $ctags->{TITLE}) {
 							my $badge = $probe->{badge};
 							$ctags->{TITLE} .= " $badge" if $badge && $ctags->{TITLE} !~ /\Q$badge\E/;
@@ -236,7 +239,10 @@ sub getTag {
 				$ctags->{SECS}         = $dur;
 				$ctags->{AUDIO}        = 1;
 				$ctags->{VIRTUAL}      = 1;
-				$ctags->{COVER_LENGTH} = $cover_len if $cover_len;
+				if ($cover_len) {
+					$ctags->{COVER_LENGTH} = $cover_len;
+					$ctags->{COVER}        = $cover_len;
+				}
 
 				if ($probe->{cues} && @{ $probe->{cues} }) {
 					my $c_start = Plugins::MultichannelAudio::Format::Matroska->find_cluster_offset_for_time($probe, $start);
@@ -287,7 +293,10 @@ sub getTag {
 		my $tags = _buildTagsFromProbe($path, $probe, undef);
 		$tags->{CONTENT_TYPE} = $eff_type;
 		$tags->{CHANNELS}     = $channels;
-		$tags->{COVER_LENGTH} = $cover_len if $cover_len;
+		if ($cover_len) {
+			$tags->{COVER_LENGTH} = $cover_len;
+			$tags->{COVER}        = $cover_len;
+		}
 
 		if ($vtype && $prefs->get('append_title_tags') && $tags->{TITLE}) {
 			my $badge = $probe->{badge};
@@ -439,6 +448,9 @@ sub _probeFile {
 			} elsif ($codec eq 'eac3' && $profile =~ /atmos/) {
 				$vtype = 'ec3';
 				$badge = '[Atmos]';
+			} elsif ($codec eq 'eac3' && $channels > 2) {
+				$vtype = 'ec3';
+				$badge = '[E-AC-3]';
 			} elsif ($codec eq 'dts' && $profile =~ /dts-hd ma/) {
 				$vtype = 'dtshd';
 				my $hint = join(' ', values %merged_tags);
@@ -643,6 +655,11 @@ sub _buildTagsFromProbe {
 	$tags{SECS}       ||= $probe->{secs} if $probe->{secs};
 	$tags{BITRATE}    ||= $probe->{bitrate} if $probe->{bitrate};
 	$tags{SIZE}       ||= $probe->{size} if $probe->{size};
+	if (defined $path && -f $path) {
+		my ($fsize, $fmtime) = (stat($path))[7, 9];
+		$tags{FILESIZE}  ||= $fsize  if defined $fsize;
+		$tags{TIMESTAMP} ||= $fmtime if defined $fmtime;
+	}
 
 	return \%tags;
 }
