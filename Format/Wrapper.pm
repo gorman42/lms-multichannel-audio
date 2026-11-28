@@ -615,8 +615,8 @@ sub _buildTagsFromProbe {
 
 	$pt{ALBUMARTIST} //= $pt{ALBUM_ARTIST} if defined $pt{ALBUM_ARTIST};
 
-	for my $key (qw(TITLE ARTIST ALBUM ALBUMARTIST COMPOSER GENRE DATE YEAR COMMENT DISCNUMBER)) {
-		if (!defined $tags{$key} && defined $pt{$key}) {
+	foreach my $key (keys %pt) {
+		if (!defined $tags{$key}) {
 			$tags{$key} = $pt{$key};
 		}
 	}
